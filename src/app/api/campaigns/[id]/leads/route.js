@@ -114,3 +114,75 @@ export async function DELETE(request, { params }) {
     deletedCount: deletion.deletedCount || 0,
   });
 }
+
+export async function PATCH(request, { params }) {
+  const auth = assertTenantContext(request);
+  if (auth.error) return apiError(auth.error, auth.status);
+
+  const { id } = await params;
+  if (!mongoose.Types.ObjectId.isValid(id)) {
+    return apiError("Invalid campaign id", 400);
+  }
+
+  await connectDB();
+  const access = await assertSubscriptionAccess({
+    companyId: auth.context.companyId,
+    featureKey: "email_marketing",
+  });
+  if (access.error) return apiError(access.error, access.status, access.meta);
+
+  const campaign = await Campaign.findOne({
+    _id: id,
+    companyId: auth.context.companyId,
+  });
+  if (!campaign) return apiError("Campaign not found", 404);
+
+  const body = await request.json().catch(() => ({}));
+  const leadId = String(body?.leadId || "").trim();
+  const nextAnswers = body?.answers;
+
+  if (!mongoose.Types.ObjectId.isValid(leadId)) {
+    return apiError("Valid leadId is required", 400);
+  }
+  if (!nextAnswers || typeof nextAnswers !== "object" || Array.isArray(nextAnswers)) {
+    return apiError("answers must be an object", 400);
+  }
+
+  const labelToKeyMap = new Map();
+  (campaign.fields || []).forEach((field) => {
+    const fieldKey = String(field?.key || "").trim();
+    const fieldLabel = String(field?.label || "").trim();
+    if (fieldLabel && fieldKey) {
+      labelToKeyMap.set(fieldLabel, fieldKey);
+    }
+  });
+
+  const normalizedAnswers = {};
+  Object.entries(nextAnswers).forEach(([rawKey, rawValue]) => {
+    const key = String(rawKey || "").trim();
+    if (!key) return;
+    const mappedKey = labelToKeyMap.get(key) || key;
+    normalizedAnswers[mappedKey] = rawValue;
+  });
+
+  const updatedLead = await CampaignLead.findOneAndUpdate(
+    {
+      _id: leadId,
+      campaignId: campaign._id,
+      companyId: auth.context.companyId,
+    },
+    {
+      $set: {
+        answers: normalizedAnswers,
+      },
+    },
+    { new: true }
+  );
+
+  if (!updatedLead) return apiError("Lead not found", 404);
+
+  return apiOk({
+    updated: true,
+    lead: updatedLead,
+  });
+}

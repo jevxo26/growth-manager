@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import * as XLSX from "xlsx";
+import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
 import { getCustomerHeaders } from "@/components/customer-api";
 import { motion, AnimatePresence } from "framer-motion";
 
@@ -26,6 +27,9 @@ export default function LeadsPageClient() {
   const [deletingLeadId, setDeletingLeadId] = useState("");
   const [deletingSelected, setDeletingSelected] = useState(false);
   const [deletingCampaignId, setDeletingCampaignId] = useState("");
+  const [editingLeadId, setEditingLeadId] = useState("");
+  const [editValues, setEditValues] = useState({});
+  const [savingEdit, setSavingEdit] = useState(false);
 
   const selectedCampaign = campaigns.find((item) => String(item._id) === String(selectedCampaignId)) || null;
   const selectedLeadSet = useMemo(() => new Set(selectedLeadIds.map(String)), [selectedLeadIds]);
@@ -38,7 +42,9 @@ export default function LeadsPageClient() {
       .then((json) => {
         const items = Array.isArray(json?.data) ? json.data : [];
         setCampaigns(items);
-        if (!selectedCampaignId && items.length) setSelectedCampaignId(String(items[0]._id));
+        if (items.length) {
+          setSelectedCampaignId((prev) => prev || String(items[0]._id));
+        }
       })
       .catch(() => setError("Failed to load campaigns"))
       .finally(() => setLoadingCampaigns(false));
@@ -140,6 +146,93 @@ export default function LeadsPageClient() {
       XLSX.utils.book_append_sheet(wb, ws, "Leads");
       XLSX.writeFile(wb, "email-recipients.xlsx");
     }
+  }
+
+  function getActiveLeadSource() {
+    return selectedLeadIds.length ? leads.filter((lead) => selectedLeadSet.has(String(lead._id))) : leads;
+  }
+
+  function getTabularRows() {
+    const leadSource = getActiveLeadSource();
+    return leadSource.map((lead) => {
+      const row = {
+        "Submitted At": lead.submittedAt ? new Date(lead.submittedAt).toLocaleString() : "-",
+      };
+      columns.forEach((column) => {
+        const value = lead.answers?.[column];
+        row[column] = Array.isArray(value) ? value.join(", ") : value ?? "-";
+      });
+      return row;
+    });
+  }
+
+  function exportExcel() {
+    setError("");
+    if (!selectedCampaignId) return setError("Select a campaign first.");
+    const rows = getTabularRows();
+    if (!rows.length) return setError("No leads to export.");
+
+    const ws = XLSX.utils.json_to_sheet(rows);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Leads");
+    XLSX.writeFile(wb, `${selectedCampaign?.name || "campaign"}-leads.xlsx`);
+  }
+
+  async function exportPdf() {
+    setError("");
+    if (!selectedCampaignId) return setError("Select a campaign first.");
+    const rows = getTabularRows();
+    if (!rows.length) return setError("No leads to export.");
+
+    const pdfDoc = await PDFDocument.create();
+    const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
+    let page = pdfDoc.addPage([842, 595]);
+    const { width, height } = page.getSize();
+    const margin = 24;
+    const lineHeight = 14;
+    const maxLineWidth = width - margin * 2;
+    const fontSize = 10;
+    let y = height - margin;
+
+    function writeLine(text) {
+      if (y < margin + lineHeight) {
+        page = pdfDoc.addPage([842, 595]);
+        y = height - margin;
+      }
+      page.drawText(String(text).slice(0, 300), {
+        x: margin,
+        y,
+        size: fontSize,
+        font,
+        color: rgb(0.1, 0.1, 0.1),
+        maxWidth: maxLineWidth,
+      });
+      y -= lineHeight;
+    }
+
+    writeLine(`Campaign: ${selectedCampaign?.name || "-"}`);
+    writeLine(`Total exported: ${rows.length}`);
+    writeLine(`Generated at: ${new Date().toLocaleString()}`);
+    y -= 8;
+
+    rows.forEach((row, index) => {
+      writeLine(`${index + 1}.`);
+      Object.entries(row).forEach(([key, value]) => {
+        writeLine(`  ${key}: ${String(value ?? "-")}`);
+      });
+      y -= 4;
+    });
+
+    const pdfBytes = await pdfDoc.save();
+    const blob = new Blob([pdfBytes], { type: "application/pdf" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${selectedCampaign?.name || "campaign"}-leads.pdf`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
   }
 
   async function handleSendToPromotions() {
@@ -254,6 +347,59 @@ export default function LeadsPageClient() {
     }
   }
 
+  function openEditLead(lead) {
+    const id = String(lead?._id || "");
+    if (!id) return;
+    const values = {};
+    columns.forEach((column) => {
+      const rawValue = lead.answers?.[column];
+      values[column] = Array.isArray(rawValue) ? rawValue.join(", ") : String(rawValue ?? "");
+    });
+    setEditingLeadId(id);
+    setEditValues(values);
+    setError("");
+  }
+
+  function closeEditLead() {
+    if (savingEdit) return;
+    setEditingLeadId("");
+    setEditValues({});
+  }
+
+  async function handleSaveLeadEdit() {
+    if (!selectedCampaignId || !editingLeadId) return;
+    setSavingEdit(true);
+    setError("");
+    try {
+      const response = await fetch(`/api/campaigns/${selectedCampaignId}/leads`, {
+        method: "PATCH",
+        headers: getCustomerHeaders(),
+        body: JSON.stringify({
+          leadId: editingLeadId,
+          answers: editValues,
+        }),
+      });
+      const json = await response.json();
+      if (!response.ok) throw new Error(json?.error || "Failed to update lead");
+
+      setLeads((prev) =>
+        prev.map((lead) =>
+          String(lead._id) === editingLeadId
+            ? {
+                ...lead,
+                answers: { ...editValues },
+              }
+            : lead
+        )
+      );
+      closeEditLead();
+    } catch (err) {
+      setError(err.message || "Failed to update lead");
+    } finally {
+      setSavingEdit(false);
+    }
+  }
+
   const columns = useMemo(() => {
     const keys = new Set();
     const ordered = [];
@@ -332,6 +478,18 @@ export default function LeadsPageClient() {
           </div>
 
           <div className="flex flex-wrap gap-2">
+            <button
+              onClick={exportExcel}
+              className="rounded-xl border border-slate-900 bg-slate-900 px-4 py-2 text-xs font-bold text-white shadow-sm transition-colors hover:bg-slate-800"
+            >
+              Export Excel
+            </button>
+            <button
+              onClick={exportPdf}
+              className="rounded-xl border border-slate-900 bg-slate-900 px-4 py-2 text-xs font-bold text-white shadow-sm transition-colors hover:bg-slate-800"
+            >
+              Export PDF
+            </button>
             <button onClick={() => handleExport("phone")} className="rounded-xl border border-slate-900 bg-slate-900 px-4 py-2 text-xs font-bold text-white shadow-sm hover:bg-slate-800 transition-colors">Export Phone</button>
             <button onClick={() => handleExport("email")} className="rounded-xl border border-slate-900 bg-slate-900 px-4 py-2 text-xs font-bold text-white shadow-sm hover:bg-slate-800 transition-colors">Export Email</button>
             <button
@@ -406,14 +564,24 @@ export default function LeadsPageClient() {
                           );
                         })}
                         <td className="px-6 py-4 text-right">
-                          <button
-                            type="button"
-                            onClick={() => handleDeleteLeads([l._id])}
-                            disabled={deletingSelected || deletingLeadId === String(l._id)}
-                            className="rounded-lg border border-rose-700 bg-rose-600 px-3 py-1.5 text-xs font-bold text-white transition-colors hover:bg-rose-700 disabled:opacity-50"
-                          >
-                            {deletingLeadId === String(l._id) ? "..." : "Delete"}
-                          </button>
+                          <div className="flex items-center justify-end gap-2">
+                            <button
+                              type="button"
+                              onClick={() => openEditLead(l)}
+                              disabled={deletingSelected || deletingLeadId === String(l._id)}
+                              className="rounded-lg border border-indigo-700 bg-indigo-600 px-3 py-1.5 text-xs font-bold text-white transition-colors hover:bg-indigo-700 disabled:opacity-50"
+                            >
+                              Edit
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteLeads([l._id])}
+                              disabled={deletingSelected || deletingLeadId === String(l._id)}
+                              className="rounded-lg border border-rose-700 bg-rose-600 px-3 py-1.5 text-xs font-bold text-white transition-colors hover:bg-rose-700 disabled:opacity-50"
+                            >
+                              {deletingLeadId === String(l._id) ? "..." : "Delete"}
+                            </button>
+                          </div>
                         </td>
                       </tr>
                     ))
@@ -424,6 +592,67 @@ export default function LeadsPageClient() {
           </motion.div>
         </AnimatePresence>
       </section>
+
+      <AnimatePresence>
+        {editingLeadId && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+          >
+            <motion.div
+              initial={{ scale: 0.96, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.96, opacity: 0 }}
+              className="max-h-[80vh] w-full max-w-2xl overflow-y-auto rounded-2xl bg-white p-6 shadow-xl"
+            >
+              <h2 className="text-lg font-bold text-slate-900">Edit Lead</h2>
+              <p className="mt-1 text-sm text-slate-500">Update lead field values and save.</p>
+
+              <div className="mt-5 space-y-4">
+                {columns.map((column) => (
+                  <label key={column} className="block">
+                    <span className="mb-1 block text-xs font-bold uppercase tracking-wide text-slate-500">
+                      {column}
+                    </span>
+                    <input
+                      type="text"
+                      value={editValues[column] ?? ""}
+                      onChange={(event) =>
+                        setEditValues((prev) => ({
+                          ...prev,
+                          [column]: event.target.value,
+                        }))
+                      }
+                      className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-900 focus:border-indigo-400 focus:outline-none"
+                    />
+                  </label>
+                ))}
+              </div>
+
+              <div className="mt-6 flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={closeEditLead}
+                  disabled={savingEdit}
+                  className="rounded-xl border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={handleSaveLeadEdit}
+                  disabled={savingEdit}
+                  className="rounded-xl border border-indigo-700 bg-indigo-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-indigo-700 disabled:opacity-50"
+                >
+                  {savingEdit ? "Saving..." : "Save Changes"}
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
