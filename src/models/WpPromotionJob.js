@@ -42,6 +42,7 @@ const wpPromotionJobSchema = new mongoose.Schema(
 
     intervalSeconds: { type: Number, default: 5, min: 5 },
     currentIndex: { type: Number, default: 0, min: 0 },
+    retryCount: { type: Number, default: 0, min: 0 },
     sentCount: { type: Number, default: 0, min: 0 },
     status: { type: String, enum: ["running", "completed", "failed", "cancelled"], default: "running", index: true },
 

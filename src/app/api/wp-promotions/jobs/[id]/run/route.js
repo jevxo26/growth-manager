@@ -4,6 +4,7 @@ import { assertSubscriptionAccess } from "@/lib/guards";
 import { incrementUsage } from "@/lib/usage";
 import { apiError, apiOk } from "@/lib/http";
 import WpPromotionJob from "@/models/WpPromotionJob";
+import WpLead from "@/models/WpLead";
 import { sendWhatsAppMessage } from "@/lib/wp/sendWhatsApp";
 
 function applyTemplate({ templateText, templateLink, name }) {
@@ -121,13 +122,44 @@ export async function POST(request, { params }) {
 
     // Handle "initializing" status from the sender
     if (sendResult?.status === "initializing") {
-      job.status = "running";
-      job.lastError = sendResult.error;
-      // Retry very soon (5 seconds)
-      job.nextRunAt = new Date(now.getTime() + 5000);
+      job.retryCount = (job.retryCount || 0) + 1;
+      
+      if (job.retryCount > 2) {
+        console.error(`[Job] Message stuck on initializing, skipping index ${recipientIndex}`);
+        job.currentIndex += 1;
+        job.retryCount = 0;
+        
+        const logEntry = {
+          index: recipientIndex,
+          name: recipient?.name || "",
+          phone: recipient?.phone,
+          status: "failed",
+          waLink: "",
+          error: sendResult?.error || "Client stuck initializing",
+          sentAt: now,
+        };
+        job.sendLogs = Array.isArray(job.sendLogs) ? job.sendLogs : [];
+        job.sendLogs.push(logEntry);
+        if (job.sendLogs.length > 100) job.sendLogs = job.sendLogs.slice(job.sendLogs.length - 100);
+        
+        if (job.currentIndex >= recipients.length) {
+          job.status = "completed";
+          job.nextRunAt = null;
+        } else {
+          job.status = "running";
+          const baseInterval = Number(job.intervalSeconds || 5);
+          job.nextRunAt = new Date(now.getTime() + baseInterval * 1000);
+        }
+      } else {
+        job.status = "running";
+        job.lastError = sendResult.error;
+        // Retry very soon (5 seconds)
+        job.nextRunAt = new Date(now.getTime() + 5000);
+      }
+      
       await job.save();
       return apiOk({
-        status: "running",
+        status: job.status,
         currentIndex: job.currentIndex,
         sentCount: job.sentCount,
         total: recipients.length,
@@ -139,10 +171,27 @@ export async function POST(request, { params }) {
     // Count it as "used" if it was queued successfully.
     if (sendResult?.queued) {
       await incrementUsage(auth.context.companyId, "wpPromotions", 1);
+      
+      // Upsert WpLead to accumulate leads
+      await WpLead.findOneAndUpdate(
+        { companyId: auth.context.companyId, phone: recipient?.phone },
+        { 
+          $set: { 
+            name: recipient?.name || "", 
+            sentAt: now 
+          },
+          $setOnInsert: {
+            isApproved: false,
+            willTakeProduct: false
+          }
+        },
+        { upsert: true, new: true }
+      );
     } else {
       throw new Error(sendResult?.error || "WhatsApp send failed");
     }
 
+    job.retryCount = 0;
     job.sentCount += 1;
     job.currentIndex += 1;
     job.lastError = "";
@@ -152,8 +201,11 @@ export async function POST(request, { params }) {
     const baseInterval = Number(job.intervalSeconds || 5);
     const isBreakPoint = job.sentCount > 0 && job.sentCount % 10 === 0;
     
-    // If 10 messages sent, wait 30 seconds. Otherwise wait baseInterval (5s).
-    const waitSeconds = isBreakPoint ? 30 : baseInterval;
+    // Add dynamic/random variations to simulate human pause and avoid bot detection
+    const randomOffset = Math.floor(Math.random() * 9) + 4; // Add 4 to 12 seconds of random delay
+    const breakpointDelay = Math.floor(Math.random() * 46) + 45; // Breakpoint wait 45 to 90 seconds
+
+    const waitSeconds = isBreakPoint ? breakpointDelay : (baseInterval + randomOffset);
     job.nextRunAt = new Date(now.getTime() + waitSeconds * 1000);
 
     const logEntry = {
@@ -187,35 +239,43 @@ export async function POST(request, { params }) {
       lastLog: logEntry,
     });
   } catch (error) {
-    // If a single message fails, log it and MOVE TO NEXT recipient instead of stopping the whole job
-    console.error(`[Job] Message failed for index ${recipientIndex}:`, error.message);
+    job.retryCount = (job.retryCount || 0) + 1;
     
-    job.currentIndex += 1;
-    job.lastError = error?.message || "Send failed";
-    
-    const logEntry = {
-      index: recipientIndex,
-      name: recipient?.name || "",
-      phone: recipient?.phone,
-      status: "failed",
-      waLink: "",
-      error: error?.message || "Send failed",
-      sentAt: now,
-    };
-    job.sendLogs = Array.isArray(job.sendLogs) ? job.sendLogs : [];
-    job.sendLogs.push(logEntry);
-    if (job.sendLogs.length > 100) job.sendLogs = job.sendLogs.slice(job.sendLogs.length - 100);
+    let logEntry;
+    if (job.retryCount > 2) {
+      console.error(`[Job] Message failed for index ${recipientIndex} after retries:`, error.message);
+      job.currentIndex += 1;
+      job.retryCount = 0;
+      job.lastError = error?.message || "Send failed";
+      
+      logEntry = {
+        index: recipientIndex,
+        name: recipient?.name || "",
+        phone: recipient?.phone,
+        status: "failed",
+        waLink: "",
+        error: error?.message || "Send failed",
+        sentAt: now,
+      };
+      job.sendLogs = Array.isArray(job.sendLogs) ? job.sendLogs : [];
+      job.sendLogs.push(logEntry);
+      if (job.sendLogs.length > 100) job.sendLogs = job.sendLogs.slice(job.sendLogs.length - 100);
 
-    // Schedule next run even on failure
-    const baseInterval = Number(job.intervalSeconds || 5);
-    job.nextRunAt = new Date(now.getTime() + baseInterval * 1000);
-
-    // If this was the last recipient, complete. Otherwise keep 'running'
-    if (job.currentIndex >= recipients.length) {
-      job.status = "completed";
-      job.nextRunAt = null;
+      // If this was the last recipient, complete. Otherwise keep 'running'
+      if (job.currentIndex >= recipients.length) {
+        job.status = "completed";
+        job.nextRunAt = null;
+      } else {
+        job.status = "running";
+        const baseInterval = Number(job.intervalSeconds || 5);
+        job.nextRunAt = new Date(now.getTime() + baseInterval * 1000);
+      }
     } else {
+      console.warn(`[Job] Message failed for index ${recipientIndex}, retrying (${job.retryCount}/2):`, error.message);
       job.status = "running";
+      job.lastError = error?.message || "Send failed";
+      // Wait a bit longer on error before retry (e.g. 5 seconds)
+      job.nextRunAt = new Date(now.getTime() + 5000);
     }
 
     await job.save();

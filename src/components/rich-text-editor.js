@@ -16,9 +16,28 @@ function htmlToText(html) {
     const tag = node.tagName.toLowerCase();
     const childText = Array.from(node.childNodes).map(toFormattedText).join("");
 
-    if (tag === "strong" || tag === "b") return `**${childText}**`;
-    if (tag === "em" || tag === "i") return `*${childText}*`;
-    if (tag === "u") return `__${childText}__`;
+    if (tag === "strong" || tag === "b") {
+      const match = childText.match(/^(\s*)(.*?)(\s*)$/s);
+      if (match && match[2]) {
+        return `${match[1]}*${match[2]}*${match[3]}`;
+      }
+      return `*${childText}*`;
+    }
+    if (tag === "em" || tag === "i") {
+      const match = childText.match(/^(\s*)(.*?)(\s*)$/s);
+      if (match && match[2]) {
+        return `${match[1]}_${match[2]}_${match[3]}`;
+      }
+      return `_${childText}_`;
+    }
+    if (tag === "s" || tag === "strike" || tag === "del") {
+      const match = childText.match(/^(\s*)(.*?)(\s*)$/s);
+      if (match && match[2]) {
+        return `${match[1]}~${match[2]}~${match[3]}`;
+      }
+      return `~${childText}~`;
+    }
+    if (tag === "u") return childText; // WhatsApp has no native underline support, keep as plain text
     if (tag === "br") return "\n";
     if (tag === "li") return `- ${childText}\n`;
     if (tag === "p" || tag === "div") return `${childText}\n`;
@@ -33,10 +52,15 @@ function htmlToText(html) {
 }
 
 function textToHtml(text) {
-  return String(text || "")
+  let html = String(text || "")
     .split("\n")
     .map((line) => `<p>${line || "&nbsp;"}</p>`)
     .join("");
+
+  return html
+    .replace(/\*(.+?)\*/g, "<strong>$1</strong>")
+    .replace(/_(.+?)_/g, "<em>$1</em>")
+    .replace(/~(.+?)~/g, "<del>$1</del>");
 }
 
 export default function RichTextEditor({

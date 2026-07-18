@@ -1,7 +1,9 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { useParams } from "next/navigation";
+import { UploadCloud, CheckCircle2, Loader2, X } from "lucide-react";
+import useImgbbUpload from "@/hooks/use-imgbb-upload";
 
 function FieldRenderer({ field, value, onChange, styles = {} }) {
   const baseInputStyle = {
@@ -19,6 +21,7 @@ function FieldRenderer({ field, value, onChange, styles = {} }) {
         value={value}
         onChange={(event) => onChange(field.key, event.target.value)}
         required={field.required}
+        placeholder={field.placeholder || `Enter ${field.label}...`}
       />
     );
   }
@@ -46,7 +49,7 @@ function FieldRenderer({ field, value, onChange, styles = {} }) {
     return (
       <div className="grid gap-2">
         {(field.options || []).map((option) => (
-          <label key={option} className="flex items-center gap-2 text-sm">
+          <label key={option} className="flex items-center gap-2 text-sm text-slate-700 font-medium">
             <input
               type="radio"
               name={field.key}
@@ -67,7 +70,7 @@ function FieldRenderer({ field, value, onChange, styles = {} }) {
     return (
       <div className="grid gap-2">
         {(field.options || []).map((option) => (
-          <label key={option} className="flex items-center gap-2 text-sm">
+          <label key={option} className="flex items-center gap-2 text-sm text-slate-700 font-medium">
             <input
               type="checkbox"
               name={field.key}
@@ -87,7 +90,72 @@ function FieldRenderer({ field, value, onChange, styles = {} }) {
     );
   }
 
-  const type = field.type === "phone" ? "tel" : field.type === "email" ? "email" : "text";
+  if (field.type === "file") {
+    const { uploadImage, uploading, error } = useImgbbUpload();
+    const fileInputRef = useRef(null);
+
+    const handleFileChange = async (e) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      try {
+        const url = await uploadImage(file);
+        onChange(field.key, url);
+      } catch (err) {
+        // Error is handled by the hook
+        if (fileInputRef.current) fileInputRef.current.value = "";
+      }
+    };
+
+    return (
+      <div className="flex flex-col items-start gap-2">
+        {value ? (
+          <div className="relative group overflow-hidden rounded-md border" style={{ borderColor: styles.inputBorderColor }}>
+            <img src={value} alt="Uploaded file" className="h-32 w-48 object-cover" />
+            <button
+              type="button"
+              onClick={() => onChange(field.key, "")}
+              className="absolute top-1 right-1 bg-black/50 text-white rounded-full p-1 opacity-0 group-hover:opacity-100 transition-opacity"
+            >
+              <X size={14} />
+            </button>
+            <div className="absolute bottom-1 right-1 bg-green-500 text-white rounded-full p-1 shadow">
+              <CheckCircle2 size={14} />
+            </div>
+          </div>
+        ) : (
+          <label 
+            className="flex flex-col items-center justify-center w-full max-w-sm h-32 border-2 border-dashed rounded-lg cursor-pointer hover:bg-zinc-50 transition-colors"
+            style={{ borderColor: styles.inputBorderColor, backgroundColor: styles.inputBgColor }}
+          >
+            <div className="flex flex-col items-center justify-center pt-5 pb-6">
+              {uploading ? (
+                <Loader2 className="h-8 w-8 text-zinc-400 animate-spin mb-2" />
+              ) : (
+                <UploadCloud className="w-8 h-8 mb-2 text-zinc-500" />
+              )}
+              <p className="mb-2 text-sm text-zinc-500">
+                <span className="font-semibold">{uploading ? "Uploading..." : "Click to upload image"}</span>
+              </p>
+            </div>
+            <input 
+              ref={fileInputRef}
+              type="file" 
+              accept="image/*"
+              className="hidden" 
+              onChange={handleFileChange}
+              disabled={uploading}
+              required={field.required}
+            />
+          </label>
+        )}
+        {error && <p className="text-xs text-red-500 mt-1">{error}</p>}
+        {/* Hidden input for HTML validation if required but not uploaded */}
+        {!value && <input type="text" className="hidden" required={field.required} value="" onChange={() => {}} />}
+      </div>
+    );
+  }
+
+  const type = field.type === "phone" ? "tel" : field.type === "email" ? "email" : field.type === "date" ? "date" : field.type === "time" ? "time" : "text";
   return (
     <input
       className="w-full border p-2"
@@ -96,6 +164,7 @@ function FieldRenderer({ field, value, onChange, styles = {} }) {
       value={value}
       onChange={(event) => onChange(field.key, event.target.value)}
       required={field.required}
+      placeholder={field.placeholder || `Enter ${field.label}...`}
     />
   );
 }

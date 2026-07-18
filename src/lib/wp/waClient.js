@@ -44,7 +44,10 @@ function getClientKey(rawKey) {
   return key || "default";
 }
 
-const clients = new Map();
+const clients = global._waClients || new Map();
+if (process.env.NODE_ENV !== "production") {
+  global._waClients = clients;
+}
 
 function getOrCreateState(rawKey) {
   const clientKey = getClientKey(rawKey);
@@ -59,6 +62,7 @@ function getOrCreateState(rawKey) {
       readyPromise: null,
       resolveReady: null,
       rejectReady: null,
+      isInitializing: false,
     });
   }
   return { clientKey, state: clients.get(clientKey) };
@@ -96,7 +100,14 @@ async function getPuppeteerConfig() {
     const config = {
       headless: true,
       executablePath: localPath,
-      args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
+      args: [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+        "--disable-extensions",
+        "--disable-accelerated-2d-canvas"
+      ],
     };
     return config;
   }
@@ -118,13 +129,25 @@ async function getPuppeteerConfig() {
   // Fallback for other Linux environments
   return {
     headless: true,
-    args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
+    args: [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-gpu",
+      "--disable-extensions",
+      "--disable-accelerated-2d-canvas"
+    ],
   };
 }
 
 export async function ensureWaClient(rawKey, force = false) {
   const { clientKey, state } = getOrCreateState(rawKey);
   
+  if (state.isInitializing) {
+    console.log(`[WA] Client ${clientKey} is already initializing, skipping force request and returning existing promise...`);
+    return state.initPromise;
+  }
+
   if (force) {
     console.log(`[WA] Force re-initialization requested for ${clientKey}`);
     if (state.client) {
@@ -170,6 +193,7 @@ export async function ensureWaClient(rawKey, force = false) {
     return null; // Don't even start the initPromise
   }
 
+  state.isInitializing = true;
   state.initPromise = (async () => {
     try {
       // Double check inside the promise to prevent race conditions
@@ -248,9 +272,6 @@ export async function ensureWaClient(rawKey, force = false) {
       
       let puppeteerConfig = {
         ...puppeteerOptions,
-        handleSIGINT: false,
-        handleSIGTERM: false,
-        handleSIGHUP: false,
       };
 
       // If using a remote browser (Browserless), we need to connect to it first
@@ -362,6 +383,7 @@ export async function ensureWaClient(rawKey, force = false) {
     console.log(`[WA] Initializing client for key: ${clientKey}...`);
     await client.initialize();
     console.log(`[WA] client.initialize() call completed for ${clientKey}. Waiting for Ready...`);
+    state.isInitializing = false;
     return client;
     } catch (err) {
       const errMsg = err?.message || String(err);
@@ -371,6 +393,7 @@ export async function ensureWaClient(rawKey, force = false) {
       state.client = null;
       state.initPromise = null;
       state.connected = false;
+      state.isInitializing = false;
       
       // If session is corrupt, this might be why it fails. Suggest logout or clear.
       if (errMsg.includes("Session") || errMsg.includes("auth")) {
@@ -437,10 +460,53 @@ export async function logoutWaClient(rawKey) {
   // 1. Destroy client if exists
   if (state.client) {
     try {
+      if (state.connected) {
+        console.log(`[WA] Attempting graceful logout for ${clientKey}...`);
+        await state.client.logout(); // This tells WA servers to invalidate session
+      }
+    } catch (e) {
+      console.error(`[WA] Graceful logout failed:`, e.message);
+    }
+    try {
       await state.client.destroy();
     } catch (e) {
       console.error(`[WA] Error destroying client during logout:`, e.message);
     }
+  }
+
+  // 1.5 Delete the local session directory to force a new QR code
+  try {
+    const fs = await import("fs");
+    const currentPath = process.cwd();
+    let remoteDataPath = path.join(currentPath, ".wwebjs_auth_local");
+    
+    // Aggressively force /tmp if we see Vercel-like paths or environment
+    if (process.env.VERCEL || process.env.VERCEL_ENV || currentPath.includes('/vercel') || currentPath.includes('/var/task')) {
+      remoteDataPath = "/tmp/wa_session_v3";
+    } else if (!remoteDataPath.startsWith("/tmp")) {
+      try {
+        const testDir = path.join(process.cwd(), ".wwebjs_write_test");
+        if (!fs.existsSync(testDir)) fs.mkdirSync(testDir, { recursive: true });
+        fs.rmdirSync(testDir);
+      } catch (e) {
+        remoteDataPath = "/tmp/.wwebjs_auth";
+      }
+    }
+
+    const sessionDir = path.join(remoteDataPath, `session-${clientId}`);
+    if (fs.existsSync(sessionDir)) {
+      console.log(`[WA] Deleting session directory: ${sessionDir}`);
+      fs.rmSync(sessionDir, { recursive: true, force: true });
+    }
+    
+    // Also delete RemoteAuth temp dirs if they exist
+    const tempSessionDir = path.join(remoteDataPath, `wwebjs_temp_session_${clientId}`);
+    if (fs.existsSync(tempSessionDir)) {
+      console.log(`[WA] Deleting temp session directory: ${tempSessionDir}`);
+      fs.rmSync(tempSessionDir, { recursive: true, force: true });
+    }
+  } catch (e) {
+    console.error(`[WA] Error deleting session files:`, e.message);
   }
   
   // 2. Clear state
@@ -545,14 +611,56 @@ export async function sendWhatsAppMessage({ phone, message, clientKey }) {
           return { queued: false, sent: false, status: "initializing", error: "WhatsApp is not connected yet. Please wait..." };
         }
 
-        state.client = null;
-        state.initPromise = null;
+        // Destroy old client and re-init
         await ensureWaClient(clientKey, true);
+        
+        // Wait for ready!
+        if (state.readyPromise) {
+          await Promise.race([
+            state.readyPromise,
+            new Promise((_, reject) => setTimeout(() => reject(new Error("Timeout waiting for ready")), 20000))
+          ]).catch(e => console.log(`[WA] Wait for ready after forced init failed:`, e.message));
+        }
         
         // If still not ready after a quick init, tell the UI to retry later
         if (!isClientTrulyReady(state.client)) {
           return { queued: false, sent: false, status: "initializing", error: "WhatsApp is starting up. Retrying in 5s..." };
         }
+      }
+      
+      // Ensure WWebJS is injected before sending
+      try {
+        let isWWebJSInjected = await state.client.pupPage.evaluate(() => typeof window.WWebJS !== 'undefined');
+        if (!isWWebJSInjected) {
+           console.log("[WA] WWebJS is not injected yet, waiting 2 seconds...");
+           await new Promise(r => setTimeout(r, 2000));
+           isWWebJSInjected = await state.client.pupPage.evaluate(() => typeof window.WWebJS !== 'undefined');
+           if (!isWWebJSInjected) {
+             throw new Error("WWebJS still not injected");
+           }
+        }
+      } catch (e) {
+        // If WWebJS is missing or evaluation fails, we throw to trigger retry
+        throw new Error("WWebJS evaluation failed: " + e.message);
+      }
+      
+      // Verify number is registered on WhatsApp
+      const isRegistered = await state.client.isRegisteredUser(waChatId);
+      if (!isRegistered) {
+        throw new Error("Number is not registered on WhatsApp");
+      }
+
+      // Simulate human typing behavior
+      try {
+        const chat = await state.client.getChatById(waChatId);
+        if (chat) {
+          await chat.sendStateTyping();
+          // Simulate typing duration: 30ms per character, min 1.5s, max 5s
+          const typingDelay = Math.min(Math.max((message || "").length * 30, 1500), 5000);
+          await new Promise(r => setTimeout(r, typingDelay));
+        }
+      } catch (err) {
+        console.warn(`[WA] Typing simulation failed (non-fatal):`, err.message);
       }
       
       const result = await state.client.sendMessage(waChatId, message || "");
@@ -562,17 +670,27 @@ export async function sendWhatsAppMessage({ phone, message, clientKey }) {
       lastErr = err;
       console.error(`[WA] Send attempt ${i+1} failed for ${digits}:`, err.message);
       
-      if (err.message.includes("detached Frame") || err.message.includes("Protocol error") || err.message.includes("Execution context was destroyed")) {
+      if (err.message.includes("detached") || err.message.includes("Protocol error") || err.message.includes("destroyed") || err.message.includes("getChat") || err.message.includes("WWebJS")) {
         console.log(`[WA] Stale browser detected, attempting to re-initialize...`);
         // Clear the state so the next attempt gets a fresh client
+        if (state.client) {
+          try { await state.client.destroy(); } catch (e) {}
+        }
         state.client = null;
         state.initPromise = null;
         state.connected = false;
         
         try {
           await ensureWaClient(clientKey);
-          // Wait a bit for the new client to be ready
-          await new Promise(r => setTimeout(r, 2000));
+          // Wait for the new client to be ready
+          if (state.readyPromise) {
+            await Promise.race([
+              state.readyPromise,
+              new Promise((_, reject) => setTimeout(() => reject(new Error("Wait timeout")), 20000))
+            ]).catch(e => console.log(`[WA] Wait during retry failed:`, e.message));
+          } else {
+            await new Promise(r => setTimeout(r, 5000));
+          }
         } catch (initErr) {
           console.error(`[WA] Re-initialization failed during retry:`, initErr.message);
         }

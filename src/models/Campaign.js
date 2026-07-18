@@ -4,9 +4,10 @@ const campaignFieldSchema = new mongoose.Schema(
   {
     key: { type: String, required: true, trim: true },
     label: { type: String, required: true, trim: true },
+    placeholder: { type: String, default: "", trim: true },
     type: {
       type: String,
-      enum: ["text", "phone", "email", "textarea", "select", "radio", "checkbox"],
+      enum: ["text", "phone", "email", "textarea", "select", "radio", "checkbox", "file", "date", "time"],
       default: "text",
     },
     required: { type: Boolean, default: false },
@@ -61,4 +62,5 @@ const campaignSchema = new mongoose.Schema(
 
 campaignSchema.index({ companyId: 1, createdAt: -1 });
 
-export default mongoose.models.Campaign || mongoose.model("Campaign", campaignSchema);
+delete mongoose.models.Campaign;
+export default mongoose.model("Campaign", campaignSchema);

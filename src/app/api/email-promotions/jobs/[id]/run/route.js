@@ -6,6 +6,7 @@ import { apiError, apiOk } from "@/lib/http";
 import EmailPromotionJob from "@/models/EmailPromotionJob";
 import EmailSmtpSetting from "@/models/EmailSmtpSetting";
 import { sendPromoEmail } from "@/lib/email/sendPromoEmail";
+import EmailLead from "@/models/EmailLead";
 
 function escapeHtml(value) {
   return String(value || "")
@@ -179,6 +180,12 @@ export async function POST(request, { params }) {
     });
 
     await incrementUsage(auth.context.companyId, "emails", 1);
+
+    await EmailLead.findOneAndUpdate(
+      { companyId: auth.context.companyId, email: recipient?.email },
+      { $setOnInsert: { name: recipient?.name, sentAt: now } },
+      { upsert: true, new: true }
+    );
 
     job.sentCount += 1;
     job.currentIndex += 1;

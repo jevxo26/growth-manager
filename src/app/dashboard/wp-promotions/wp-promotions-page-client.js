@@ -22,9 +22,9 @@ function renderTemplatePreview({ templateText, templateLink, name }) {
 function renderTemplatePreviewHtml(message) {
   const escaped = String(message || "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
   return escaped
-    .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
-    .replace(/__(.+?)__/g, "<u>$1</u>")
-    .replace(/\*(.+?)\*/g, "<em>$1</em>")
+    .replace(/\*(.+?)\*/g, "<strong>$1</strong>")
+    .replace(/_(.+?)_/g, "<em>$1</em>")
+    .replace(/~(.+?)~/g, "<del>$1</del>")
     .replaceAll("\n", "<br/>");
 }
 
@@ -124,15 +124,28 @@ function WpPromotionsPageContent() {
 
   async function runJobOnce(activeJobId) {
     if (!activeJobId) return;
-    const res = await fetch(`/api/wp-promotions/jobs/${activeJobId}/run`, { method: "POST", headers: getCustomerHeaders() });
-    const json = await res.json();
-    const data = json?.data || {};
-    if (data?.lastLog) setSendLogs(prev => [...prev, data.lastLog].slice(-200));
-    setJobState(s => ({ ...s, ...data }));
-    if (data?.status === "completed" || data?.status === "failed") {
-      if (timerRef.current) clearInterval(timerRef.current);
-      setJobId("");
-      loadUsage();
+    try {
+      const res = await fetch(`/api/wp-promotions/jobs/${activeJobId}/run`, { method: "POST", headers: getCustomerHeaders() });
+      const json = await res.json();
+      const data = json?.data || {};
+      if (data?.lastLog) setSendLogs(prev => [...prev, data.lastLog].slice(-200));
+      setJobState(s => ({ ...s, ...data }));
+
+      if (data?.status === "completed" || data?.status === "failed") {
+        if (timerRef.current) clearTimeout(timerRef.current);
+        setJobId("");
+        loadUsage();
+        return;
+      }
+
+      // Schedule next execution sequentially to prevent overlapping requests
+      if (timerRef.current) clearTimeout(timerRef.current);
+      timerRef.current = setTimeout(() => runJobOnce(activeJobId), intervalSeconds * 1000);
+    } catch (err) {
+      console.error("Error running job step:", err);
+      // Retry after interval if there's a network error
+      if (timerRef.current) clearTimeout(timerRef.current);
+      timerRef.current = setTimeout(() => runJobOnce(activeJobId), intervalSeconds * 1000);
     }
   }
 
@@ -149,11 +162,20 @@ function WpPromotionsPageContent() {
         setJobId(json.data.jobId);
         setSendLogs([]);
         setJobState({ status: "running", currentIndex: 0, sentCount: 0, total: recipients.length, nextRunAt: null, lastError: "", lastWaLink: "" });
-        timerRef.current = setInterval(() => runJobOnce(json.data.jobId), intervalSeconds * 1000);
+
+        // Clear any old timer and start the first execution
+        if (timerRef.current) clearTimeout(timerRef.current);
         runJobOnce(json.data.jobId);
       }
     } catch { setError("Failed to start bulk send"); }
   }
+
+  // Cleanup timer on component unmount
+  useEffect(() => {
+    return () => {
+      if (timerRef.current) clearTimeout(timerRef.current);
+    };
+  }, []);
 
   async function handleWaReconnect() {
     setWaLastError("Resetting connection...");
@@ -178,11 +200,9 @@ function WpPromotionsPageContent() {
           <p className="mt-1 text-sm text-slate-500">Manage connections and automate your campaigns.</p>
         </div>
         <div className="flex items-center gap-4">
-          {waConnected && (
-            <button onClick={handleWaReconnect} className="text-[10px] font-bold text-rose-600 bg-rose-50 px-3 py-1.5 rounded-xl hover:bg-rose-100 transition-colors">
-              Disconnect
-            </button>
-          )}
+          <button onClick={handleWaReconnect} className="text-[10px] font-bold text-rose-600 bg-rose-50 px-3 py-1.5 rounded-xl hover:bg-rose-100 border border-rose-100 transition-colors shadow-sm">
+            {waConnected ? "Disconnect" : "Reset / Force Logout"}
+          </button>
           <div className="flex items-center gap-2 rounded-2xl bg-slate-50 px-4 py-2 ring-1 ring-slate-200">
             <div className={`h-2.5 w-2.5 rounded-full ${waConnected ? "bg-emerald-500 animate-pulse" : "bg-rose-500"}`} />
             <span className="text-sm font-bold text-slate-700">{waConnected ? "Connected" : "Not Connected"}</span>
@@ -194,14 +214,14 @@ function WpPromotionsPageContent() {
       <section className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
         <div className="flex items-center justify-between mb-4">
           <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Monthly Usage</span>
-          <span className="text-[10px] font-bold text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded-full">{Math.round((used/limit)*100)}% Used</span>
+          <span className="text-[10px] font-bold text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded-full">{Math.round((used / limit) * 100)}% Used</span>
         </div>
         <div className="flex items-end justify-between">
           <p className="text-3xl font-bold text-slate-900">{used}</p>
           <p className="text-sm font-medium text-slate-400">/ {limit} Messages</p>
         </div>
         <div className="mt-4 h-2 w-full bg-slate-100 rounded-full overflow-hidden">
-          <div className="h-full bg-indigo-600 transition-all duration-1000" style={{ width: `${Math.min(100, (used/limit)*100)}%` }} />
+          <div className="h-full bg-indigo-600 transition-all duration-1000" style={{ width: `${Math.min(100, (used / limit) * 100)}%` }} />
         </div>
       </section>
 
@@ -218,8 +238,8 @@ function WpPromotionsPageContent() {
                       <Image src={waQrDataUrl} alt="WhatsApp QR" width={200} height={200} className="h-48 w-48" />
                     </div>
                     <p className="text-xs font-medium text-slate-500">Scan QR with WhatsApp</p>
-                    <button 
-                      onClick={handleWaReconnect} 
+                    <button
+                      onClick={handleWaReconnect}
                       className="mt-2 text-[10px] font-bold text-indigo-600 bg-indigo-50 px-4 py-2 rounded-xl hover:bg-indigo-100 transition-all flex items-center gap-2 shadow-sm"
                     >
                       <RefreshCw className="h-3 w-3" />
@@ -230,11 +250,11 @@ function WpPromotionsPageContent() {
                   <div className="flex flex-col items-center">
                     <div className="h-8 w-8 animate-spin rounded-full border-4 border-indigo-600 border-t-transparent" />
                     <p className="mt-4 text-sm font-bold text-slate-500">Loading QR...</p>
-                    <button 
-                      onClick={handleWaReconnect} 
-                      className="mt-4 text-[10px] font-bold text-slate-400 hover:text-indigo-600 transition-colors"
+                    <button
+                      onClick={handleWaReconnect}
+                      className="mt-6 text-xs font-bold text-rose-600 bg-rose-50 px-4 py-2 rounded-lg hover:bg-rose-100 border border-rose-200 transition-all shadow-sm"
                     >
-                      Stuck? Try Resetting
+                      Stuck? Force Reset / Logout
                     </button>
                   </div>
                 )}
@@ -250,7 +270,7 @@ function WpPromotionsPageContent() {
             ) : (
               <div className="flex flex-col items-center justify-center h-full py-8 text-center">
                 <div className="h-16 w-16 flex items-center justify-center rounded-full bg-emerald-100 text-emerald-600 mb-4">
-                  <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+                  <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" /><polyline points="22 4 12 14.01 9 11.01" /></svg>
                 </div>
                 <p className="text-lg font-bold text-slate-900">Connected</p>
                 <p className="text-sm text-slate-500 mt-1">Ready for automation</p>
@@ -298,14 +318,34 @@ function WpPromotionsPageContent() {
         <div className="grid gap-10 lg:grid-cols-2">
           <div className="space-y-6">
             <div className="space-y-2">
-              <label className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Message Template</label>
+              <div className="flex items-center justify-between">
+                <label className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Message Template</label>
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setTemplateText(prev => prev + " {{name}}")}
+                    className="text-[10px] font-black text-indigo-600 bg-indigo-50 px-2.5 py-1 rounded-lg hover:bg-indigo-100 transition-all border border-indigo-100 shadow-sm"
+                    title="Insert Customer Name variable"
+                  >
+                    + Add Name
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setTemplateText(prev => prev + " {{link}}")}
+                    className="text-[10px] font-black text-indigo-600 bg-indigo-50 px-2.5 py-1 rounded-lg hover:bg-indigo-100 transition-all border border-indigo-100 shadow-sm"
+                    title="Insert Action Link variable"
+                  >
+                    + Add Link
+                  </button>
+                </div>
+              </div>
               <RichTextEditor value={templateText} onChange={setTemplateText} outputMode="text" minHeight={300} disabled={!!jobId} />
             </div>
             <div className="space-y-2">
               <label className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Action Link (Optional)</label>
-              <input className="w-full rounded-2xl border border-slate-100 bg-slate-50/30 px-5 py-4 text-sm outline-none focus:border-indigo-600 focus:bg-white transition-all" value={templateLink} onChange={e => setTemplateLink(e.target.value)} placeholder="https://..." disabled={!!jobId} />
+              <input className="w-full rounded-2xl border border-slate-100 bg-slate-50/30 px-5 py-4 text-sm outline-none focus:border-indigo-600 focus:bg-white transition-all shadow-inner" value={templateLink} onChange={e => setTemplateLink(e.target.value)} placeholder="https://..." disabled={!!jobId} />
             </div>
-            <button 
+            <button
               onClick={handleBulkSend} disabled={!draftId || !waConnected || !!jobId}
               className="w-full rounded-2xl bg-indigo-600 py-5 text-sm font-black text-white shadow-xl shadow-indigo-600/30 hover:bg-indigo-700 disabled:opacity-50 transform active:scale-[0.98] transition-all uppercase tracking-widest"
             >
@@ -313,13 +353,74 @@ function WpPromotionsPageContent() {
             </button>
           </div>
 
-          <div className="space-y-8">
+          <div className="space-y-8 flex flex-col justify-start">
             <div className="space-y-3">
-              <label className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Live Preview</label>
-              <div className="rounded-[40px] bg-slate-900 p-6 shadow-2xl relative overflow-hidden group">
-                <div className="absolute inset-0 bg-gradient-to-br from-indigo-500/10 to-purple-500/10 pointer-events-none" />
-                <div className="rounded-3xl bg-white/10 backdrop-blur-md p-6 text-sm text-white leading-relaxed min-h-[250px] border border-white/10">
-                  <div dangerouslySetInnerHTML={{ __html: renderTemplatePreviewHtml(previewMessage) }} className="prose prose-invert max-w-none" />
+              <label className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Live WhatsApp Preview</label>
+              {/* Realistic WhatsApp UI Frame */}
+              <div className="rounded-[36px] bg-[#0b141a] border-[8px] border-[#222e35] shadow-2xl relative overflow-hidden flex flex-col min-h-[420px] max-w-[360px] mx-auto w-full">
+                {/* Status Bar */}
+                <div className="bg-[#008069] text-white/80 px-5 pt-2 pb-1 flex justify-between items-center text-[10px] font-semibold select-none">
+                  <span>12:00</span>
+                  <div className="flex items-center gap-1">
+                    <span>5G</span>
+                    <div className="w-4 h-2.5 border border-white/60 rounded-xs p-0.5 flex items-center">
+                      <div className="bg-white h-full w-full rounded-2xs" />
+                    </div>
+                  </div>
+                </div>
+
+                {/* WhatsApp Header */}
+                <div className="bg-[#008069] text-white px-3 py-2 flex items-center gap-2 select-none shadow-md">
+                  <div className="w-8 h-8 rounded-full bg-teal-700/50 flex items-center justify-center font-bold text-white text-xs">
+                    SD
+                  </div>
+                  <div className="flex-1">
+                    <h4 className="text-xs font-bold leading-tight">Smart Delivery</h4>
+                    <span className="text-[9px] text-teal-100 leading-none">Online</span>
+                  </div>
+                  <div className="flex items-center gap-3 text-white/90">
+                    <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z" /></svg>
+                    <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24"><path d="M20.01 15.38c-1.23 0-2.42-.2-3.53-.56a.977.977 0 0 0-1.01.24l-2.2 2.2a15.045 15.045 0 0 1-6.59-6.59l2.2-2.2c.28-.28.36-.67.25-1.02A11.36 11.36 0 0 1 8.5 4c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1 0 9.39 7.61 17 17 17 .55 0 1-.45 1-1v-3.5c0-.55-.45-1-1-1z" /></svg>
+                  </div>
+                </div>
+
+                {/* Chat Background */}
+                <div
+                  className="flex-1 p-4 overflow-y-auto flex flex-col justify-end min-h-[300px]"
+                  style={{
+                    backgroundColor: "#efeae2",
+                    backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='80' height='80' viewBox='0 0 80 80'%3E%3Cg fill='%239C92AC' fill-opacity='0.06'%3E%3Cpath d='M50 50c0-5.522 4.478-10 10-10s10 4.478 10 10-4.478 10-10 10c0 5.522-4.478 10-10 10s-10-4.478-10-10 4.478-10 10-10zM10 10c0-5.522 4.478-10 10-10s10 4.478 10 10-4.478 10-10 10c0 5.522-4.478 10-10 10S0 25.522 0 20s4.478-10 10-10zm10 8c4.418 0 8-3.582 8-8s-3.582-8-8-8-8 3.582-8 8 3.582 8 8 8zm40 40c4.418 0 8-3.582 8-8s-3.582-8-8-8-8 3.582-8 8 3.582 8 8 8z'/%3E%3C/g%3E%3C/svg%3E")`
+                  }}
+                >
+                  {/* WhatsApp Chat Bubble */}
+                  <div className="max-w-[85%] bg-white rounded-2xl rounded-tr-none p-3 shadow-sm relative self-end mb-2 border border-black/5 animate-in fade-in slide-in-from-bottom-2 duration-300">
+                    <div className="absolute top-0 -right-2 w-3 h-3 overflow-hidden">
+                      <div className="bg-white w-4 h-4 rotate-45 transform origin-top-left -translate-y-1 shadow-xs" />
+                    </div>
+
+                    <div
+                      dangerouslySetInnerHTML={{ __html: renderTemplatePreviewHtml(previewMessage) }}
+                      className="text-xs text-[#111b21] break-words whitespace-pre-wrap leading-relaxed prose prose-sm max-w-none prose-strong:font-bold prose-em:italic"
+                    />
+
+                    <div className="flex items-center justify-end gap-1 mt-1.5 select-none">
+                      <span className="text-[9px] text-[#667781]">12:00 PM</span>
+                      <span className="text-[#53bdeb]">
+                        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth="2.5"><path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Footer Input Area */}
+                <div className="bg-[#f0f2f5] p-2 flex items-center gap-2 border-t border-[#e9edef] select-none">
+                  <div className="flex-1 bg-white rounded-full py-1.5 px-4 text-[11px] text-slate-400 flex items-center justify-between shadow-xs">
+                    <span>Type a message</span>
+                    <span>😀</span>
+                  </div>
+                  <div className="w-7 h-7 rounded-full bg-[#008069] flex items-center justify-center text-white shadow-xs">
+                    <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24"><path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5.3-3c0 3-2.54 5.1-5.3 5.1S6.7 14 6.7 11H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c3.28-.48 6-3.3 6-6.72h-1.7z" /></svg>
+                  </div>
                 </div>
               </div>
             </div>

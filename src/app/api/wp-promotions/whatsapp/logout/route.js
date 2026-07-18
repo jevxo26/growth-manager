@@ -1,10 +1,11 @@
 import { NextResponse } from "next/server";
 import { logoutWaClient } from "@/lib/wp/waClient";
+import { assertTenantContext } from "@/lib/auth-context";
 
 export async function POST(request) {
   try {
-    const { searchParams } = new URL(request.url);
-    const clientKey = searchParams.get("key") || "default";
+    const auth = assertTenantContext(request);
+    const clientKey = auth?.context?.companyId || "default";
     
     const result = await logoutWaClient(clientKey);
     return NextResponse.json(result);
@@ -17,8 +18,8 @@ export async function POST(request) {
 // Support GET for easy manual trigger if needed
 export async function GET(request) {
   try {
-    const { searchParams } = new URL(request.url);
-    const clientKey = searchParams.get("key") || "default";
+    const auth = assertTenantContext(request);
+    const clientKey = auth?.context?.companyId || "default";
     
     const result = await logoutWaClient(clientKey);
     return NextResponse.json(result);
