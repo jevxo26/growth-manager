@@ -127,20 +127,37 @@ async function getPuppeteerConfig() {
   }
 
   // Fallback for other Linux environments
-  console.log("[WA] Selected Mode: Sparticuz Chromium (Railway/Linux)");
-  const chromium = require("@sparticuz/chromium-min");
+  console.log("[WA] Selected Mode: Nixpacks Chromium");
   
-  // Dynamically download and extract the precompiled chromium binary
-  // This bypasses all Linux shared library errors because it brings its own!
-  const executablePath = await chromium.executablePath(
-    "https://github.com/Sparticuz/chromium/releases/download/v131.0.1/chromium-v131.0.1-pack.tar"
-  );
+  let linuxChromePath = process.env.PUPPETEER_EXECUTABLE_PATH;
+  
+  // Resolve absolute path because Puppeteer strictly requires an absolute path
+  if (!linuxChromePath || !linuxChromePath.startsWith("/")) {
+    try {
+      linuxChromePath = require("child_process").execSync("which chromium").toString().trim();
+      console.log(`[WA] Resolved Chromium absolute path: ${linuxChromePath}`);
+    } catch (e) {
+      try {
+        linuxChromePath = require("child_process").execSync("which google-chrome-stable").toString().trim();
+        console.log(`[WA] Resolved Google Chrome absolute path: ${linuxChromePath}`);
+      } catch (err) {
+        console.warn("[WA] Could not resolve chromium absolute path using 'which'.");
+        linuxChromePath = undefined;
+      }
+    }
+  }
 
   return {
     headless: true,
-    executablePath: executablePath,
-    args: chromium.args,
-    defaultViewport: chromium.defaultViewport,
+    executablePath: linuxChromePath,
+    args: [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-gpu",
+      "--disable-extensions",
+      "--disable-accelerated-2d-canvas"
+    ],
   };
 }
 
