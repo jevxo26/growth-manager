@@ -127,9 +127,22 @@ async function getPuppeteerConfig() {
   }
 
   // Fallback for other Linux environments
+  let linuxChromePath = process.env.PUPPETEER_EXECUTABLE_PATH;
+  if (!linuxChromePath) {
+    try {
+      linuxChromePath = require("child_process").execSync("which chromium").toString().trim();
+    } catch (e) {
+      try {
+        linuxChromePath = require("child_process").execSync("which google-chrome-stable").toString().trim();
+      } catch (err) {
+        linuxChromePath = undefined;
+      }
+    }
+  }
+
   return {
     headless: true,
-    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || 'chromium',
+    executablePath: linuxChromePath,
     args: [
       "--no-sandbox",
       "--disable-setuid-sandbox",
