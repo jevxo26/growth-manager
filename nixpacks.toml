@@ -5,7 +5,7 @@ NIXPACKS_INSTALL_CMD = "npm install"
 nodeVersion = "22"
 
 [phases.setup]
-nixPkgs = ["...", "nodejs"]
+nixPkgs = ["...", "nodejs", "chromium", "glib"]
 
 [phases.install]
 cmds = ["npm install"]

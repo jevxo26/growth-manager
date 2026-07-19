@@ -127,8 +127,25 @@ async function getPuppeteerConfig() {
   }
 
   // Fallback for other Linux environments
+  let linuxChromePath = process.env.PUPPETEER_EXECUTABLE_PATH;
+  
+  // If the env var is set to a raw command name like "chromium", it will crash Puppeteer. 
+  // We must resolve it to an absolute path using 'which'.
+  if (!linuxChromePath || !linuxChromePath.startsWith("/")) {
+    try {
+      linuxChromePath = require("child_process").execSync("which chromium").toString().trim();
+    } catch (e) {
+      try {
+        linuxChromePath = require("child_process").execSync("which google-chrome-stable").toString().trim();
+      } catch (err) {
+        linuxChromePath = undefined;
+      }
+    }
+  }
+
   return {
     headless: true,
+    executablePath: linuxChromePath,
     args: [
       "--no-sandbox",
       "--disable-setuid-sandbox",
