@@ -129,6 +129,7 @@ async function getPuppeteerConfig() {
   // Fallback for other Linux environments
   return {
     headless: true,
+    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || 'chromium',
     args: [
       "--no-sandbox",
       "--disable-setuid-sandbox",
