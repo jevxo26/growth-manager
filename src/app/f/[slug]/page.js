@@ -15,7 +15,7 @@ function FieldRenderer({ field, value, onChange, styles = {} }) {
   if (field.type === "textarea") {
     return (
       <textarea
-        className="w-full border p-2"
+        className="w-full border p-2 placeholder:text-slate-500"
         style={baseInputStyle}
         rows={4}
         value={value}
@@ -158,7 +158,7 @@ function FieldRenderer({ field, value, onChange, styles = {} }) {
   const type = field.type === "phone" ? "tel" : field.type === "email" ? "email" : field.type === "date" ? "date" : field.type === "time" ? "time" : "text";
   return (
     <input
-      className="w-full border p-2"
+      className="w-full border p-2 placeholder:text-slate-500"
       style={baseInputStyle}
       type={type}
       value={value}
