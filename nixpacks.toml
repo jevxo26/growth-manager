@@ -4,6 +4,9 @@ nodeVersion = "20"
 [phases.setup]
 nixPkgs = ["...", "nodejs", "chromium", "glib"]
 
+[phases.install]
+cmds = ["npm install"]
+
 [phases.build]
 cmds = ["npm run build"]
 
